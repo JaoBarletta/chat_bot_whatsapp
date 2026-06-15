@@ -3,71 +3,76 @@ const Database = require('../database/connection');
 
 const sequelize = Database.getInstance();
 
-const Usuario = sequelize.define('Usuario', {
-  id_usuario: {
-    type: DataTypes.INTEGER,
+// Ajustado para usar a tabela `pacientes` do schema fornecido
+const Usuario = sequelize.define('Paciente', {
+  id: {
+    type: DataTypes.BIGINT.UNSIGNED,
     primaryKey: true,
     autoIncrement: true,
-    field: 'id_usuario',
+    field: 'id',
   },
   nome: {
-    type: DataTypes.STRING(150),
+    type: DataTypes.STRING(120),
     allowNull: false,
     field: 'nome',
-    comment: 'Nome do usuário',
-  },
-  data_nascimento: {
-    type: DataTypes.DATEONLY,
-    allowNull: false,
-    field: 'data_nascimento',
-    comment: 'Data de nascimento do paciente',
-  },
-  cpf: {
-    type: DataTypes.STRING(14),
-    allowNull: false,
-    field: 'cpf',
-    comment: 'CPF do paciente',
   },
   telefone: {
     type: DataTypes.STRING(20),
     allowNull: false,
     unique: true,
     field: 'telefone',
-    comment: 'Número do WhatsApp com código do país',
+  },
+  data_nascimento: {
+    type: DataTypes.DATEONLY,
+    allowNull: true,
+    field: 'data_nascimento',
+  },
+  cpf: {
+    type: DataTypes.STRING(14),
+    allowNull: true,
+    field: 'cpf',
   },
   email: {
-    type: DataTypes.STRING(150),
+    type: DataTypes.STRING(120),
     allowNull: true,
     field: 'email',
-    validate: {
-      isEmail: true,
-    },
-    comment: 'E-mail do usuário',
   },
-  status: {
-    type: DataTypes.ENUM('ativo', 'inativo', 'bloqueado'),
-    defaultValue: 'ativo',
-    field: 'status',
-    comment: 'Status do usuário',
+  sexo: {
+    type: DataTypes.ENUM('M','F','O'),
+    allowNull: true,
+    field: 'sexo',
   },
-  data_cadastro: {
+  endereco: {
+    type: DataTypes.STRING(255),
+    allowNull: true,
+    field: 'endereco',
+  },
+  perfil_cor: {
+    type: DataTypes.ENUM('cirurgia','limpeza','restauracao','estetica','ortodontia','implante','outro'),
+    allowNull: true,
+    field: 'perfil_cor',
+  },
+  ativo: {
+    type: DataTypes.TINYINT,
+    allowNull: false,
+    defaultValue: 1,
+    field: 'ativo',
+  },
+  created_at: {
     type: DataTypes.DATE,
     allowNull: false,
     defaultValue: DataTypes.NOW,
-    field: 'data_cadastro',
-    comment: 'Data de cadastro do usuário',
+    field: 'created_at',
+  },
+  updated_at: {
+    type: DataTypes.DATE,
+    allowNull: false,
+    defaultValue: DataTypes.NOW,
+    field: 'updated_at',
   },
 }, {
-  tableName: 'usuarios',
+  tableName: 'pacientes',
   timestamps: false,
-  indexes: [
-    {
-      fields: ['telefone'],
-    },
-    {
-      fields: ['email'],
-    },
-  ],
 });
 
 module.exports = Usuario;

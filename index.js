@@ -1,234 +1,276 @@
+'use strict';
+
 require('dotenv').config();
 
+const fs = require('fs');
+const path = require('path');
 const {
   default: makeWASocket,
   useMultiFileAuthState,
   DisconnectReason,
-  Browsers
-} = require("@whiskeysockets/baileys")
+  Browsers,
+  downloadMediaMessage,
+} = require('@whiskeysockets/baileys');
+const qrcode = require('qrcode-terminal');
+const Database = require('./src/database/connection');
+const UserService = require('./src/services/UserService');
+const AtendimentoService = require('./src/services/AtendimentoService');
+const AgendamentoService = require('./src/services/AgendamentoService');
+const AnamneseService = require('./src/services/AnamneseService');
+const MessageService = require('./src/services/MessageService');
+const NotificationService = require('./src/services/NotificationService');
+const MessageHandler = require('./src/handlers/MessageHandler');
+const WhatsAppReportService = require('./src/services/WhatsAppReportService');
+const IncomingMessageBuffer = require('./src/services/IncomingMessageBuffer');
 
-const qrcode = require("qrcode-terminal")
-const Database = require('./src/database/connection')
-const UserService = require('./src/services/UserService')
-const AtendimentoService = require('./src/services/AtendimentoService')
+const authDirectory = path.join(__dirname, 'auth');
+const lidPhoneCache = new Map();
+let databaseInitialized = false;
+let notificationsStarted = false;
+const reportDeliveryService = new WhatsAppReportService();
 
-const registrationState = new Map()
+const messageHandler = new MessageHandler({
+  sendMessage: (to, message) => MessageService.send(to, message),
+  onAttendanceCompleted: async ({ report, photo, patient }) => {
+    console.log('\nRELATORIO PARA O DENTISTA:\n');
+    console.log(report);
+    await reportDeliveryService.send({ report, photo, patient });
+  },
+});
+const incomingMessageBuffer = new IncomingMessageBuffer({
+  processMessage: (payload) => messageHandler.handle(payload),
+  waitMs: process.env.MESSAGE_DEBOUNCE_MS || 3000,
+  onError: async (error, { conversationId }) => {
+    console.error('Erro ao processar mensagem:', error.message);
+    await MessageService.send(conversationId, {
+      text: 'Nao foi possivel processar sua mensagem agora. Tente novamente em instantes.',
+    });
+  },
+});
 
-function getPhoneFromMessage(msg) {
-  const participant = msg.key?.participant
-  const remoteJid = msg.key?.remoteJid
+function loadLidMapping(lid) {
+  if (!lid) return null;
 
-  if (participant) {
-    return UserService.normalizePhone(participant)
+  if (lidPhoneCache.has(lid)) {
+    return lidPhoneCache.get(lid);
   }
 
-  return UserService.normalizePhone(remoteJid)
+  const mappingFile = path.join(authDirectory, `lid-mapping-${lid}_reverse.json`);
+
+  if (!fs.existsSync(mappingFile)) {
+    lidPhoneCache.set(lid, null);
+    return null;
+  }
+
+  try {
+    const raw = fs.readFileSync(mappingFile, 'utf8').trim();
+    const parsed = JSON.parse(raw);
+    const phone = UserService.normalizePhone(parsed);
+    lidPhoneCache.set(lid, phone || null);
+    return phone || null;
+  } catch (error) {
+    lidPhoneCache.set(lid, null);
+    return null;
+  }
+}
+
+function getPhoneFromMessage(msg) {
+  const participant = msg.key?.participant;
+  const remoteJid = msg.key?.remoteJid;
+
+  const toValidPhone = (jid) => {
+    if (!jid) return null;
+
+    const jidString = String(jid);
+    if (jidString.endsWith('@lid')) {
+      const mappedPhone = loadLidMapping(jidString.split('@')[0]);
+      if (mappedPhone && UserService.isValidPhone(mappedPhone)) {
+        return mappedPhone;
+      }
+    }
+
+    const phone = UserService.normalizePhone(jid);
+    return UserService.isValidPhone(phone) ? phone : null;
+  };
+
+  const isGroupChat =
+    String(remoteJid || '').endsWith('@g.us') ||
+    String(remoteJid || '').endsWith('@broadcast');
+
+  if (isGroupChat) {
+    const participantPhone = toValidPhone(participant);
+    if (participantPhone) return participantPhone;
+  }
+
+  return toValidPhone(remoteJid) || toValidPhone(participant);
+}
+
+function unwrapMessage(message) {
+  let current = message;
+
+  while (current) {
+    const wrapped =
+      current.ephemeralMessage?.message ||
+      current.viewOnceMessage?.message ||
+      current.viewOnceMessageV2?.message;
+
+    if (!wrapped) break;
+    current = wrapped;
+  }
+
+  return current || {};
+}
+
+function extractIncomingContent(msg) {
+  const message = unwrapMessage(msg.message);
+  const image = message.imageMessage;
+  const text =
+    message.conversation ||
+    message.extendedTextMessage?.text ||
+    image?.caption ||
+    message.videoMessage?.caption ||
+    message.buttonsResponseMessage?.selectedDisplayText ||
+    message.listResponseMessage?.title ||
+    '';
+
+  return {
+    text: String(text).trim(),
+    hasImage: Boolean(image),
+    imageMimetype: image?.mimetype || null,
+  };
+}
+
+async function initializeDatabase() {
+  if (databaseInitialized) return;
+
+  await Database.testConnection();
+  await UserService.syncModel();
+  await AtendimentoService.syncModel();
+  await AgendamentoService.syncModel();
+  await AnamneseService.syncModel();
+
+  const Tratamento = require('./src/models/Tratamento');
+  const Pagamento = require('./src/models/Pagamento');
+  const ImagemClinica = require('./src/models/ImagemClinica');
+
+  await Tratamento.sync();
+  await Pagamento.sync();
+  await ImagemClinica.sync();
+  databaseInitialized = true;
+  console.log('Banco MySQL conectado com sucesso');
+}
+
+function registerMessagingServices(sock) {
+  reportDeliveryService.registerSocket(sock);
+
+  MessageService.registerSender(async (to, message) => {
+    const jid = String(to || '').includes('@')
+      ? String(to)
+      : `${String(to)}@s.whatsapp.net`;
+    return sock.sendMessage(jid, message);
+  });
+
+  if (notificationsStarted) return;
+
+  NotificationService.start({
+    sendMessage: (to, message) => MessageService.send(to, message),
+  });
+  notificationsStarted = true;
 }
 
 async function startSock() {
   try {
-    await Database.testConnection()
-    await UserService.syncModel()
-    await AtendimentoService.syncModel()
-    console.log('Banco MySQL conectado com sucesso')
+    await initializeDatabase();
   } catch (error) {
-    console.error('Erro ao conectar no banco:', error.message)
-    process.exit(1)
+    console.error('Erro ao conectar no banco:', error.message);
+    process.exit(1);
   }
 
-  const { state, saveCreds } = await useMultiFileAuthState("auth")
-
+  const { state, saveCreds } = await useMultiFileAuthState(authDirectory);
   const sock = makeWASocket({
     auth: state,
-    browser: Browsers.ubuntu("Chrome"),
-    version: [2, 3000, 1034074495]
-  })
+    browser: Browsers.ubuntu('Chrome'),
+    version: [2, 3000, 1034074495],
+  });
 
-  sock.ev.on("connection.update", async (update) => {
-    const { connection, qr, lastDisconnect } = update
+  registerMessagingServices(sock);
 
+  sock.ev.on('connection.update', ({ connection, qr, lastDisconnect }) => {
     if (qr) {
-      qrcode.generate(qr, { small: true })
+      qrcode.generate(qr, { small: true });
     }
 
-    if (connection === "open") {
-      console.log("✅ WhatsApp conectado")
+    if (connection === 'open') {
+      console.log('WhatsApp conectado');
     }
 
-    if (connection === "close") {
-      const statusCode = lastDisconnect?.error?.output?.statusCode
-      console.log("Conexão fechada. Status:", statusCode)
+    if (connection === 'close') {
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      console.log('Conexao fechada. Status:', statusCode);
 
       if (statusCode !== DisconnectReason.loggedOut) {
-        setTimeout(() => startSock(), 3000)
+        setTimeout(() => {
+          startSock().catch((error) => {
+            console.error('Erro ao reconectar WhatsApp:', error.message);
+          });
+        }, 3000);
       } else {
-        console.log("Sessão encerrada. Apague a pasta auth e conecte novamente.")
+        console.log('Sessao encerrada. Apague a pasta auth e conecte novamente.');
       }
     }
-  })
+  });
 
-  sock.ev.on("creds.update", saveCreds)
+  sock.ev.on('creds.update', saveCreds);
 
-  sock.ev.on("messages.upsert", async ({ messages }) => {
-    const msg = messages[0]
-    if (!msg.message) return
-    if (msg.key.fromMe) return
+  sock.ev.on('messages.upsert', async ({ messages }) => {
+    for (const msg of messages) {
+      if (!msg.message || msg.key.fromMe) continue;
 
-    const text =
-      msg.message.conversation ||
-      msg.message.extendedTextMessage?.text
+      const from = msg.key.remoteJid;
+      const phone = getPhoneFromMessage(msg);
+      const { text, hasImage, imageMimetype } = extractIncomingContent(msg);
 
-    if (!text) return
+      if (!text && !hasImage) continue;
 
-    const from = msg.key.remoteJid
-    const telefoneOrigem = getPhoneFromMessage(msg)
-
-    if (!telefoneOrigem) {
-      await sock.sendMessage(from, {
-        text: 'Nao consegui identificar seu numero. Envie novamente sua mensagem.'
-      })
-      return
-    }
-    const normalizedText = text.trim()
-    const textLower = normalizedText.toLowerCase()
-    const eventoInicio = new Date()
-
-    const flow = registrationState.get(from)
-
-    if (textLower === 'cancelar') {
-      registrationState.delete(from)
-      await sock.sendMessage(from, { text: 'Fluxo cancelado. Envie qualquer mensagem para recomecar.' })
-      return
-    }
-
-    if (flow?.step === 'waiting_name') {
-      registrationState.set(from, {
-        step: 'waiting_birth_date',
-        nome: normalizedText,
-      })
-
-      await sock.sendMessage(from, {
-        text: 'Informe sua *data de nascimento* (dd/mm/aaaa).'
-      })
-      return
-    }
-
-    if (flow?.step === 'waiting_birth_date') {
-      if (!UserService.isValidBirthDate(normalizedText)) {
+      if (!phone) {
         await sock.sendMessage(from, {
-          text: 'Data invalida. Envie no formato *dd/mm/aaaa*.'
-        })
-        return
-      }
-
-      registrationState.set(from, {
-        ...flow,
-        step: 'waiting_cpf',
-        dataNascimento: normalizedText,
-      })
-
-      await sock.sendMessage(from, { text: 'Agora informe o *CPF* (somente numeros ou formatado).' })
-      return
-    }
-
-    if (flow?.step === 'waiting_cpf') {
-      if (!UserService.isValidCpf(normalizedText)) {
-        await sock.sendMessage(from, {
-          text: 'CPF invalido. Envie um CPF com 11 digitos.'
-        })
-        return
-      }
-
-      registrationState.set(from, {
-        ...flow,
-        step: 'waiting_email',
-        cpf: normalizedText,
-      })
-
-      await sock.sendMessage(from, {
-        text: 'Telefone identificado automaticamente pelo WhatsApp. Agora informe seu *e-mail* ou digite *pular*.'
-      })
-      return
-    }
-
-    if (flow?.step === 'waiting_email') {
-      const skipEmail = textLower === 'pular'
-      const email = skipEmail ? null : normalizedText
-
-      if (!skipEmail && !UserService.isValidEmail(email)) {
-        await sock.sendMessage(from, {
-          text: 'E-mail invalido. Digite um e-mail valido ou *pular*.'
-        })
-        return
+          text: 'Nao consegui identificar um numero de telefone valido. Envie sua mensagem em conversa privada para continuarmos o atendimento.',
+        });
+        continue;
       }
 
       try {
-        const { user, created } = await UserService.createPatient({
-          nome: flow.nome,
-          dataNascimento: flow.dataNascimento,
-          cpf: flow.cpf,
-          telefone: telefoneOrigem,
-          email,
-        })
+        let media = null;
 
-        registrationState.delete(from)
+        if (hasImage) {
+          try {
+            const buffer = await downloadMediaMessage(msg, 'buffer', {});
+            media = {
+              buffer,
+              mimetype: imageMimetype || 'image/jpeg',
+            };
+          } catch (error) {
+            console.error('Erro ao baixar foto enviada pelo paciente:', error.message);
+          }
+        }
 
-        await sock.sendMessage(from, {
-          text: created
-            ? `Cadastro concluido com sucesso! ID do paciente: ${user.id_usuario}`
-            : `Paciente atualizado com sucesso! ID: ${user.id_usuario}`
-        })
-
-        await sock.sendMessage(from, {
-          text: 'Agora me diga sua solicitacao para iniciar o atendimento.'
-        })
+        incomingMessageBuffer.enqueue({
+          conversationId: from,
+          phone,
+          message: text,
+          hasImage,
+          media,
+        });
       } catch (error) {
-        registrationState.delete(from)
+        console.error('Erro ao preparar mensagem:', error.message);
         await sock.sendMessage(from, {
-          text: 'Nao foi possivel concluir o cadastro agora. Tente novamente.'
-        })
+          text: 'Nao foi possivel processar sua mensagem agora. Tente novamente em instantes.',
+        });
       }
-
-      return
     }
-
-    const paciente = await UserService.findByPhone(telefoneOrigem)
-
-    if (!paciente) {
-      registrationState.set(from, { step: 'waiting_name' })
-      await sock.sendMessage(from, {
-        text: 'Ola! Nao encontrei seu cadastro. Vamos comecar. Qual o seu *nome completo*?'
-      })
-      return
-    }
-
-    if (textLower === "oi") {
-      await sock.sendMessage(from, {
-        text: `Ola, ${paciente.nome}! Como posso ajudar hoje?`
-      })
-      return
-    }
-
-    const tipoSolicitacao = AtendimentoService.classifyRequest(normalizedText)
-    const resposta = AtendimentoService.buildReply({
-      tipoSolicitacao,
-      pacienteNome: paciente.nome,
-    })
-
-    await sock.sendMessage(from, { text: resposta })
-
-    const eventoFim = new Date()
-
-    await AtendimentoService.saveHistory({
-      idUsuario: paciente.id_usuario,
-      telefone: paciente.telefone,
-      mensagemRecebida: normalizedText,
-      tipoSolicitacao,
-      respostaEnviada: resposta,
-      eventoInicio,
-      eventoFim,
-    })
-  })
+  });
 }
 
-startSock()
+startSock().catch((error) => {
+  console.error('Erro ao iniciar o chatbot:', error.message);
+});

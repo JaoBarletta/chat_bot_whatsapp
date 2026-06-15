@@ -69,18 +69,8 @@ class UserService {
 	}
 
 	static async syncModel() {
+		// Apenas sincroniza o modelo `pacientes` conforme o schema fornecido
 		await Usuario.sync();
-
-		const sequelize = Usuario.sequelize;
-		const [dataNascimentoColumn] = await sequelize.query("SHOW COLUMNS FROM usuarios LIKE 'data_nascimento'");
-		if (!dataNascimentoColumn.length) {
-			await sequelize.query('ALTER TABLE usuarios ADD COLUMN data_nascimento DATE NULL');
-		}
-
-		const [cpfColumn] = await sequelize.query("SHOW COLUMNS FROM usuarios LIKE 'cpf'");
-		if (!cpfColumn.length) {
-			await sequelize.query('ALTER TABLE usuarios ADD COLUMN cpf VARCHAR(14) NULL');
-		}
 	}
 
 	static async findByPhone(phoneOrJid) {
@@ -121,10 +111,6 @@ class UserService {
 			throw new Error('Telefone invalido para cadastro.');
 		}
 
-		if (!normalizedDate) {
-			throw new Error('Data de nascimento invalida.');
-		}
-
 		if (!cleanedCpf || cleanedCpf.length !== 11) {
 			throw new Error('CPF invalido.');
 		}
@@ -139,7 +125,7 @@ class UserService {
 				data_nascimento: normalizedDate,
 				telefone: cleanedPhone,
 				email: email || byCpf.email,
-				status: 'ativo',
+				ativo: 1,
 			});
 
 			return { user: byCpf, created: false };
@@ -151,7 +137,7 @@ class UserService {
 			cpf: cleanedCpf,
 			telefone: cleanedPhone,
 			email,
-			status: 'ativo',
+			ativo: 1,
 		});
 
 		return { user, created: true };
