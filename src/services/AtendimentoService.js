@@ -1,4 +1,5 @@
 const HistoricoAtendimento = require('../models/HistoricoAtendimento');
+const ValidationLog = require('./ValidationLogService');
 const AgendamentoService = require('./AgendamentoService');
 const TriagemService = require('./TriagemService');
 
@@ -586,7 +587,7 @@ static async handleSymptomStep({ state, message }) {
     eventoFim,
   }) {
     try {
-      await HistoricoAtendimento.create({
+      await ValidationLog.measure('db.history', () => HistoricoAtendimento.create({
         paciente_id: idUsuario || null,
         modelo_id: null,
         consulta_id: null,
@@ -595,7 +596,7 @@ static async handleSymptomStep({ state, message }) {
         canal: 'whatsapp',
         status: 'enviada',
         enviada_em: eventoFim || new Date(),
-      });
+      }));
     } catch (err) {
       console.error('Erro ao salvar historico/mensagem:', err.message);
     }

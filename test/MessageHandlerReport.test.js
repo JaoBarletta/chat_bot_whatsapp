@@ -156,3 +156,87 @@ test('MessageHandler exige marcacao explicita antes de gerar relatorio', async (
 
   assert.equal(reports, 0);
 });
+
+test('MessageHandler cria evento no Google Calendar ao encerrar agendamento', async () => {
+  const calendarEvents = [];
+  const reports = [];
+  const appointmentDateTime = new Date(2026, 5, 18, 15, 0, 0);
+  const patient = {
+    id: 4,
+    nome: 'Joao Victor',
+    telefone: '554196950668',
+    email: 'joao@example.com',
+  };
+  const finishedFlow = {
+    intent: IntentTypes.AGENDAMENTO,
+    async start() {
+      return {
+        intent: IntentTypes.AGENDAMENTO,
+        finished: true,
+        reportable: true,
+        reply: 'Agendamento registrado.',
+        appointment: {
+          id: 25,
+          dateTime: appointmentDateTime,
+          procedure: 'Limpeza',
+          need: 'Limpeza de rotina',
+          complexity: 'BAIXA',
+        },
+        reportData: {
+          procedure: 'Limpeza',
+          need: 'Limpeza de rotina',
+          complexity: 'BAIXA',
+          appointmentDate: '18/06/2026 às 15:00',
+          appointmentDateTime,
+        },
+      };
+    },
+  };
+
+  const handler = new MessageHandler({
+    sendMessage: async () => {},
+    router: {
+      async route() {
+        return IntentTypes.AGENDAMENTO;
+      },
+    },
+    userService: {
+      async findByPhone() {
+        return patient;
+      },
+    },
+    atendimentoService: {
+      async saveHistory() {},
+    },
+    responseHumanizer: {
+      async humanize({ baseReply }) {
+        return baseReply;
+      },
+    },
+    flows: new Map([[IntentTypes.AGENDAMENTO, finishedFlow]]),
+    onAttendanceCompleted: async (payload) => reports.push(payload),
+    calendarService: {
+      async createAppointmentEvent(payload) {
+        calendarEvents.push(payload);
+        return {
+          created: true,
+          eventId: 'tccappt25',
+        };
+      },
+    },
+  });
+
+  await handler.handle({
+    conversationId: 'chat-calendar',
+    phone: patient.telefone,
+    message: 'Quero agendar limpeza',
+  });
+
+  assert.equal(reports.length, 1);
+  assert.equal(calendarEvents.length, 1);
+  assert.equal(calendarEvents[0].patient.email, 'joao@example.com');
+  assert.equal(calendarEvents[0].appointment.id, 25);
+  assert.equal(calendarEvents[0].appointment.procedure, 'Limpeza');
+  assert.equal(calendarEvents[0].reportData.appointmentDateTime, appointmentDateTime);
+  assert.match(calendarEvents[0].report, /RELATÓRIO DE AGENDAMENTO/);
+});

@@ -2,12 +2,21 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+test.beforeEach((t) => {
+  const previous = process.env.OPENAI_HUMANIZATION_MODE;
+  process.env.OPENAI_HUMANIZATION_MODE = 'always';
+  t.after(() => {
+    if (previous === undefined) delete process.env.OPENAI_HUMANIZATION_MODE;
+    else process.env.OPENAI_HUMANIZATION_MODE = previous;
+  });
+});
 const ResponseHumanizerService = require('../src/services/ResponseHumanizerService');
+const OpenAIService = require('../src/services/OpenAIService');
 const IntentTypes = require('../src/constants/IntentTypes');
 
 test('humanizador aceita reformulacao segura', async () => {
   const service = new ResponseHumanizerService({
-    ollamaService: {
+    aiService: {
       async humanizeReply() {
         return 'Certo! Qual periodo voce prefere: manha, tarde ou noite?';
       },
@@ -25,10 +34,33 @@ test('humanizador aceita reformulacao segura', async () => {
   );
 });
 
+test('humanizador em modo smart nao chama IA para agendamento operacional', async () => {
+  let calls = 0;
+  const baseReply =
+    'Para 04/09/2026, os horários disponíveis são: 14:00, 15:00 e 16:00. Qual horário você prefere?';
+  const service = new ResponseHumanizerService({
+    mode: 'smart',
+    aiService: {
+      async humanizeReply() {
+        calls += 1;
+        return 'Resposta gerada pela IA';
+      },
+    },
+  });
+
+  const result = await service.humanize({
+    baseReply,
+    intent: IntentTypes.AGENDAMENTO,
+  });
+
+  assert.equal(result, baseReply);
+  assert.equal(calls, 0);
+});
+
 test('humanizador usa fallback quando a IA introduz procedimento', async () => {
   const baseReply = 'As informacoes serao avaliadas pelo dentista.';
   const service = new ResponseHumanizerService({
-    ollamaService: {
+    aiService: {
       async humanizeReply() {
         return 'As informacoes serao avaliadas e provavelmente sera necessario canal.';
       },
@@ -47,7 +79,7 @@ test('humanizador usa fallback quando a IA introduz procedimento', async () => {
 test('humanizador usa fallback quando a IA troca procedimento ou inventa numero', async () => {
   const baseReply = 'Vou registrar Limpeza em 20/06/2026. Confirma?';
   const service = new ResponseHumanizerService({
-    ollamaService: {
+    aiService: {
       async humanizeReply() {
         return 'Vou registrar Clareamento em 21/06/2026. Confirma?';
       },
@@ -66,9 +98,9 @@ test('humanizador usa fallback quando a IA troca procedimento ou inventa numero'
 test('humanizador usa fallback quando a IA falha', async () => {
   const baseReply = 'Vou encaminhar seu atendimento para a equipe.';
   const service = new ResponseHumanizerService({
-    ollamaService: {
+    aiService: {
       async humanizeReply() {
-        throw new Error('Ollama indisponivel');
+        throw new Error('IA indisponivel');
       },
     },
   });
@@ -85,7 +117,7 @@ test('humanizador usa fallback quando a IA falha', async () => {
 test('humanizador rejeita confirmacao de vaga que o fluxo nao aprovou', async () => {
   const baseReply = 'Só para confirmar sua solicitação para 18/06/2026 às 15:00. Está certo?';
   const service = new ResponseHumanizerService({
-    ollamaService: {
+    aiService: {
       async humanizeReply() {
         return 'Você tem um agendamento marcado para 18/06/2026 às 15:00. Está certo?';
       },
@@ -104,7 +136,7 @@ test('humanizador rejeita confirmacao de vaga que o fluxo nao aprovou', async ()
 test('humanizador rejeita repeticao do nome que nao existe no texto aprovado', async () => {
   const baseReply = 'Há quanto tempo você está sentindo esse incômodo?';
   const service = new ResponseHumanizerService({
-    ollamaService: {
+    aiService: {
       async humanizeReply() {
         return 'João, há quanto tempo você está sentindo esse incômodo?';
       },
@@ -124,7 +156,7 @@ test('humanizador rejeita repeticao do nome que nao existe no texto aprovado', a
 test('humanizador rejeita nova saudacao e frase generica no meio da conversa', async () => {
   const baseReply = 'Você já sabe qual procedimento gostaria de agendar?';
   const service = new ResponseHumanizerService({
-    ollamaService: {
+    aiService: {
       async humanizeReply() {
         return 'Oi! Estou aqui para ajudar. Qual procedimento você gostaria de agendar?';
       },
@@ -147,7 +179,7 @@ test('humanizador rejeita nova saudacao e frase generica no meio da conversa', a
 test('humanizador rejeita troca da pergunta de procedimento por motivo', async () => {
   const baseReply = 'Você já sabe qual procedimento gostaria de agendar?';
   const service = new ResponseHumanizerService({
-    ollamaService: {
+    aiService: {
       async humanizeReply() {
         return 'Qual é o motivo da sua visita à clínica odontológica?';
       },
@@ -167,7 +199,7 @@ test('humanizador rejeita troca da pergunta de procedimento por motivo', async (
 test('humanizador rejeita pergunta que perde a data aprovada', async () => {
   const baseReply = 'Qual data você prefere para agendarmos Limpeza?';
   const service = new ResponseHumanizerService({
-    ollamaService: {
+    aiService: {
       async humanizeReply() {
         return 'Você gostaria de fazer um agendamento por causa da limpeza?';
       },
@@ -185,16 +217,19 @@ test('humanizador rejeita pergunta que perde a data aprovada', async () => {
 });
 
 test('debug informa a mensagem final escolhida pelo humanizador', async () => {
-  const originalDebug = process.env.OLLAMA_DEBUG;
+  const originalDebug = process.env.OPENAI_DEBUG;
   const originalLog = console.log;
   const logs = [];
-  process.env.OLLAMA_DEBUG = 'true';
+  process.env.OPENAI_DEBUG = 'true';
   console.log = (...args) => logs.push(args.join(' '));
 
   const service = new ResponseHumanizerService({
-    ollamaService: {
+    aiService: {
       async humanizeReply() {
         return 'Certo. Qual data você prefere?';
+      },
+      logDebugDecision(payload) {
+        OpenAIService.logDebugDecision(payload);
       },
     },
   });
@@ -209,16 +244,14 @@ test('debug informa a mensagem final escolhida pelo humanizador', async () => {
     assert.equal(reply, 'Certo. Qual data você prefere?');
     assert.match(output, /VALIDACAO DO HUMANIZADOR/);
     assert.match(output, /Resultado: ACEITA/);
-    assert.match(
-      output,
-      /Mensagem final enviada: Certo\. Qual data você prefere\?/
-    );
+    assert.match(output, /Mensagem final enviada:/);
+    assert.match(output, /Certo\. Qual data/);
   } finally {
     console.log = originalLog;
     if (originalDebug === undefined) {
-      delete process.env.OLLAMA_DEBUG;
+      delete process.env.OPENAI_DEBUG;
     } else {
-      process.env.OLLAMA_DEBUG = originalDebug;
+      process.env.OPENAI_DEBUG = originalDebug;
     }
   }
 });
@@ -227,7 +260,7 @@ test('humanizador rejeita risada ou comentario jocoso sobre a dor', async () => 
   const baseReply =
     'Há quanto tempo você está sentindo essa dor ou incômodo?';
   const service = new ResponseHumanizerService({
-    ollamaService: {
+    aiService: {
       async humanizeReply() {
         return 'Ahaha, dor no dente é um incômodo bem real! Pode me contar por quanto tempo você sente essa dor forte?';
       },
@@ -243,3 +276,25 @@ test('humanizador rejeita risada ou comentario jocoso sobre a dor', async () => 
     baseReply
   );
 });
+
+test('humanizador rejeita resposta com rotulos Paciente ou Atendente', async () => {
+  const baseReply =
+    'Tem algum problema renal, hepatico, imunologico ou alteracao de coagulacao?';
+  const service = new ResponseHumanizerService({
+    aiService: {
+      async humanizeReply() {
+        return `Paciente: nao\nAtendente: ${baseReply}`;
+      },
+    },
+  });
+
+  assert.equal(
+    await service.humanize({
+      baseReply,
+      intent: IntentTypes.AGENDAMENTO,
+    }),
+    baseReply
+  );
+});
+
+

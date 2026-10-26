@@ -7,6 +7,7 @@ const ProcedureComplexityService = require('../services/ProcedureComplexityServi
 const ConversationTextService = require('../services/ConversationTextService');
 const TriagemService = require('../services/TriagemService');
 const DateParserService = require('../services/DateParserService');
+const TimeParserService = require('../services/TimeParserService');
 
 class AgendamentoFlow extends BaseFlow {
   constructor({ agendamentoService, anamneseService } = {}) {
@@ -342,6 +343,13 @@ class AgendamentoFlow extends BaseFlow {
   }
 
   async handleTimeStep(state, message) {
+    const time = this.parseTime(message, state.availableSlots);
+    if (time && state.availableSlots.includes(time)) {
+      state.time = time;
+      state.step = 'waiting_confirmation';
+      return this.next(this.buildConfirmation(state));
+    }
+
     const period = this.normalizePeriod(message);
     if (period) {
       const periodSlots = this.filterSlotsByPeriod(state.availableSlots, period);
@@ -352,7 +360,6 @@ class AgendamentoFlow extends BaseFlow {
       );
     }
 
-    const time = this.parseTime(message);
     if (!time) {
       return this.next(
         `Não consegui identificar o horário. Para ${state.date}, escolha uma destas opções: ${this.formatSlots(state.availableSlots)}.`
@@ -403,6 +410,7 @@ class AgendamentoFlow extends BaseFlow {
     }
 
     const patient = context.patient?.dataValues || context.patient || {};
+    state.procedure = ProcedureCatalog.canonicalize(state.procedure);
     const dataHorario = this.toAppointmentDate(state.date, state.time);
     const requiresAnamnesis = ProcedureComplexityService.requiresAnamnesis(
       state.complexity
@@ -416,6 +424,7 @@ class AgendamentoFlow extends BaseFlow {
       ...state.anamnesis,
     });
 
+    let appointment = null;
     try {
       if (requiresAnamnesis) {
         await this.anamneseService.saveForPatient({
@@ -424,7 +433,7 @@ class AgendamentoFlow extends BaseFlow {
         });
       }
 
-      await this.agendamentoService.createAppointment({
+      appointment = await this.agendamentoService.createAppointment({
         idUsuario: patient.id,
         telefone: patient.telefone,
         dataHorario,
@@ -445,11 +454,21 @@ class AgendamentoFlow extends BaseFlow {
       );
     }
 
+    const appointmentData = appointment?.dataValues || appointment || {};
     this.clearState(context.conversationId);
     return {
       intent: this.intent,
       finished: true,
       reportable: true,
+      appointment: {
+        id: appointmentData.id || null,
+        dateTime: dataHorario,
+        durationMinutes: appointmentData.duracao_min || null,
+        procedure: state.procedure,
+        need: state.need,
+        complexity: state.complexity,
+        status: 'pendente',
+      },
       reportData: {
         complaint: state.need || state.procedure,
         need: state.need,
@@ -457,6 +476,8 @@ class AgendamentoFlow extends BaseFlow {
         complexity: state.complexity,
         anamnesis: state.anamnesis,
         appointmentDate: `${state.date} às ${state.time}`,
+        appointmentDateTime: dataHorario,
+        durationMinutes: appointmentData.duracao_min || null,
       },
       reply: `Prontinho! Registrei sua solicitação para ${state.date} às ${state.time}. A equipe vai conferir e confirmar o horário com você por aqui.`,
     };
@@ -479,16 +500,8 @@ class AgendamentoFlow extends BaseFlow {
     });
   }
 
-  parseTime(value) {
-    const text = ProcedureCatalog.normalize(value);
-    const match = text.match(
-      /\b([01]?\d|20)(?::([0-5]\d))?\s*(?:h|horas?)?\b/
-    );
-    if (!match) return null;
-
-    const hour = String(Number(match[1])).padStart(2, '0');
-    const minute = String(Number(match[2] || 0)).padStart(2, '0');
-    return `${hour}:${minute}`;
+  parseTime(value, availableSlots = []) {
+    return TimeParserService.parse(value, { availableSlots });
   }
 
   formatDate(date) {
@@ -506,7 +519,7 @@ class AgendamentoFlow extends BaseFlow {
   isAffirmative(message) {
     const text = ConversationTextService.normalize(message);
     if (/\b(nao|cancelar|remarcar|trocar)\b/.test(text)) return false;
-    return /\b(sim|ok|okay|confirmo|pode confirmar|certo|correto|esta certo|tudo certo)\b/.test(
+    return /\b(sim|ok|okay|confirmo|pode confirmar|certo|certinho|correto|esta certo|ta certo|tudo certo|isso|isso mesmo|pode ser|beleza|combinado|fechado|perfeito|tranquilo)\b/.test(
       text
     );
   }
@@ -660,7 +673,7 @@ class AgendamentoFlow extends BaseFlow {
     const specificProcedure = procedures.find(
       (procedure) => !this.isGenericConsultation(procedure)
     );
-    return specificProcedure || procedures[0] || null;
+    return ProcedureCatalog.canonicalize(specificProcedure || procedures[0]);
   }
 
   isGenericConsultation(procedure) {
@@ -669,7 +682,7 @@ class AgendamentoFlow extends BaseFlow {
 
   isAvailabilityQuestion(message) {
     const text = ProcedureCatalog.normalize(message);
-    return /\b(que dias|quais dias|dias disponiveis|tem disponivel|tem disponibilidade|qual disponibilidade|quais horarios|horarios disponiveis|quando tem vaga|tem vaga|essa semana|esta semana|proxima semana|semana que vem|proximos dias)\b/.test(
+    return /\b(que dias|quais dias|quais datas|datas disponiveis|dias disponiveis|proximas datas|tem disponivel|tem disponibilidade|qual disponibilidade|quais horarios|horarios disponiveis|quando tem vaga|tem vaga|essa semana|esta semana|proxima semana|semana que vem|proximos dias)\b/.test(
       text
     );
   }

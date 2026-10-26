@@ -5,7 +5,15 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "metrics:ai": "node scripts/ai_usage.js",
+    "metrics:validation": "node scripts/validation_metrics.js",
+    "validate:sprints": "node scripts/validate_sprints.js",
+    "benchmark:sprint2": "node scripts/benchmark_sprint2.js",
+    "test:db": "node scripts/validate_database.js",
+    "test:calendar:auth": "node scripts/test_google_calendar.js --auth-only",
+    "test:openai:live": "node scripts/smoke_openai.js",
+    "test:ia": "node --test test/AIDataPolicyService.test.js test/OpenAIService.test.js test/ResponseHumanizerService.test.js test/FlowRouter.test.js test/Flows.test.js"
   },
   "repository": {
     "type": "git",

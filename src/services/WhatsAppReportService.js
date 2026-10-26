@@ -1,4 +1,5 @@
 'use strict';
+const ValidationLog = require('./ValidationLogService');
 
 class WhatsAppReportService {
   constructor({ groupName = process.env.REPORT_GROUP_NAME || 'Relatorios TCC' } = {}) {
@@ -13,6 +14,11 @@ class WhatsAppReportService {
   }
 
   async send({ report, photo, patient }) {
+    return ValidationLog.measure('whatsapp.report', () => this.sendReport({ report, photo, patient }),
+      { hasPhoto: Boolean(photo?.buffer) });
+  }
+
+  async sendReport({ report, photo, patient }) {
     if (!this.socket) {
       throw new Error('Socket do WhatsApp nao registrado para envio de relatorios.');
     }
@@ -22,11 +28,11 @@ class WhatsAppReportService {
 
     if (photo?.buffer) {
       const patientData = patient?.dataValues || patient || {};
-      await this.socket.sendMessage(groupId, {
+      await ValidationLog.measure('whatsapp.photo', () => this.socket.sendMessage(groupId, {
         image: photo.buffer,
         mimetype: photo.mimetype || 'image/jpeg',
         caption: `Foto enviada por ${patientData.nome || 'paciente nao identificado'}.`,
-      });
+      }));
     }
   }
 

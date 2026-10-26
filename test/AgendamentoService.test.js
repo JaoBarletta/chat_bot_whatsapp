@@ -52,3 +52,20 @@ function restoreEnv(name, value) {
     process.env[name] = value;
   }
 }
+
+test('salva duracao ofertada, paciente e observacoes e recusa horario ocupado', async (t) => {
+  let saved;
+  const transaction = { LOCK: { UPDATE: 'UPDATE' } };
+  t.mock.method(Agendamento.sequelize, 'transaction', async (_options, action) => action(transaction));
+  t.mock.method(AgendamentoService, 'isSlotAvailable', async () => true);
+  t.mock.method(AgendamentoService, 'getScheduleConfig', () => ({ slotMinutes: 30 }));
+  t.mock.method(Agendamento, 'create', async (data) => { saved = data; return data; });
+  await AgendamentoService.createAppointment({ idUsuario: 7, dataHorario: new Date(2030, 1, 1, 10), anamnese: '{"procedimento":"Limpeza"}' });
+  assert.equal(saved.duracao_min, 30);
+  assert.equal(saved.paciente_id, 7);
+  assert.equal(saved.status, 'pendente');
+  assert.equal(JSON.parse(saved.observacoes).procedimento, 'Limpeza');
+  AgendamentoService.isSlotAvailable.mock.mockImplementation(async () => false);
+  await assert.rejects(AgendamentoService.createAppointment({ dataHorario: new Date() }), { code: 'SLOT_UNAVAILABLE' });
+  assert.equal(Agendamento.create.mock.callCount(), 1);
+});

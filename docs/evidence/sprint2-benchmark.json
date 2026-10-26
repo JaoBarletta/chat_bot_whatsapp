@@ -1,0 +1,152 @@
+{
+  "generatedAt": "2026-10-16T16:46:01.077Z",
+  "method": "Replays offline com IA echo, banco, WhatsApp e Calendar simulados. Nao mede latencia de rede, tokens reais nem qualidade linguistica da IA.",
+  "comparison": [
+    {
+      "version": "10c95b9",
+      "scenario": "limpeza",
+      "passed": false,
+      "reason": "atendimento deve encerrar\n\n1 !== 0\n",
+      "durationMs": 15.73
+    },
+    {
+      "version": "10c95b9",
+      "scenario": "triagem",
+      "passed": true,
+      "messages": 8,
+      "aiCalls": 0,
+      "appointments": 1,
+      "reports": 1,
+      "calendarEvents": 0,
+      "history": 8,
+      "durationMs": 2.87
+    },
+    {
+      "version": "10c95b9",
+      "scenario": "implante",
+      "passed": true,
+      "messages": 13,
+      "aiCalls": 13,
+      "appointments": 1,
+      "reports": 1,
+      "calendarEvents": 0,
+      "history": 13,
+      "durationMs": 19.65
+    },
+    {
+      "version": "10c95b9",
+      "scenario": "pendente",
+      "passed": true,
+      "messages": 6,
+      "aiCalls": 0,
+      "appointments": 0,
+      "reports": 1,
+      "calendarEvents": 0,
+      "history": 6,
+      "durationMs": 0.77
+    },
+    {
+      "version": "atual-always",
+      "scenario": "limpeza",
+      "passed": true,
+      "messages": 5,
+      "aiCalls": 5,
+      "appointments": 1,
+      "reports": 1,
+      "calendarEvents": 1,
+      "history": 5,
+      "durationMs": 14.64
+    },
+    {
+      "version": "atual-always",
+      "scenario": "triagem",
+      "passed": true,
+      "messages": 8,
+      "aiCalls": 0,
+      "appointments": 1,
+      "reports": 1,
+      "calendarEvents": 1,
+      "history": 8,
+      "durationMs": 1.41
+    },
+    {
+      "version": "atual-always",
+      "scenario": "implante",
+      "passed": true,
+      "messages": 13,
+      "aiCalls": 13,
+      "appointments": 1,
+      "reports": 1,
+      "calendarEvents": 1,
+      "history": 13,
+      "durationMs": 13.84
+    },
+    {
+      "version": "atual-always",
+      "scenario": "pendente",
+      "passed": true,
+      "messages": 6,
+      "aiCalls": 0,
+      "appointments": 0,
+      "reports": 1,
+      "calendarEvents": 0,
+      "history": 6,
+      "durationMs": 0.72
+    },
+    {
+      "version": "atual-smart",
+      "scenario": "limpeza",
+      "passed": true,
+      "messages": 5,
+      "aiCalls": 1,
+      "appointments": 1,
+      "reports": 1,
+      "calendarEvents": 1,
+      "history": 5,
+      "durationMs": 1.45
+    },
+    {
+      "version": "atual-smart",
+      "scenario": "triagem",
+      "passed": true,
+      "messages": 8,
+      "aiCalls": 0,
+      "appointments": 1,
+      "reports": 1,
+      "calendarEvents": 1,
+      "history": 8,
+      "durationMs": 0.94
+    },
+    {
+      "version": "atual-smart",
+      "scenario": "implante",
+      "passed": true,
+      "messages": 13,
+      "aiCalls": 0,
+      "appointments": 1,
+      "reports": 1,
+      "calendarEvents": 1,
+      "history": 13,
+      "durationMs": 1.02
+    },
+    {
+      "version": "atual-smart",
+      "scenario": "pendente",
+      "passed": true,
+      "messages": 6,
+      "aiCalls": 0,
+      "appointments": 0,
+      "reports": 1,
+      "calendarEvents": 0,
+      "history": 6,
+      "durationMs": 0.64
+    }
+  ],
+  "load": {
+    "conversations": 100,
+    "concurrency": 10,
+    "elapsedMs": 77.69,
+    "p50Ms": 7.14,
+    "p95Ms": 9.91
+  }
+}

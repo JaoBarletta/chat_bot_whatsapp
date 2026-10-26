@@ -1,4 +1,5 @@
 'use strict';
+const ValidationLog = require('./ValidationLogService');
 
 class IncomingMessageBuffer {
   constructor({
@@ -39,6 +40,7 @@ class IncomingMessageBuffer {
       hasImage: false,
       media: null,
       timer: null,
+      firstReceivedAt: Date.now(),
     };
 
     if (current.timer) {
@@ -78,9 +80,17 @@ class IncomingMessageBuffer {
     };
 
     const previous = this.processing.get(conversationId) || Promise.resolve();
+    const queuedAt = Date.now();
     const processing = previous
       .catch(() => {})
-      .then(() => this.processMessage(payload));
+      .then(async () => {
+        await ValidationLog.run(conversationId, () => ValidationLog.record('message.buffer', {
+          fragmentCount: batch.fragments.length, hasImage: batch.hasImage,
+          bufferMs: queuedAt - batch.firstReceivedAt, queueMs: Date.now() - queuedAt,
+          status: 'flushed',
+        }));
+        return this.processMessage(payload);
+      });
 
     this.processing.set(conversationId, processing);
 

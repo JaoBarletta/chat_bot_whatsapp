@@ -6,6 +6,7 @@ const ConversationTextService = require('../services/ConversationTextService');
 const ProcedureCatalog = require('../services/ProcedureCatalog');
 const TriagemService = require('../services/TriagemService');
 const DateParserService = require('../services/DateParserService');
+const TimeParserService = require('../services/TimeParserService');
 
 class TriagemFlow extends BaseFlow {
   constructor({ agendamentoService } = {}) {
@@ -50,6 +51,15 @@ class TriagemFlow extends BaseFlow {
     }
 
     this.updateComplexity(state, message);
+
+    const requiredQuestions = {
+      waiting_time: 'Há quanto tempo você está sentindo esse incômodo?',
+      waiting_location: 'Em qual dente ou região da boca está o incômodo?',
+      waiting_characteristics: 'Pode descrever quando esse incômodo aparece?',
+    };
+    if (!message && requiredQuestions[state.step]) {
+      return this.next(requiredQuestions[state.step]);
+    }
 
     if (state.step === 'waiting_time') {
       state.symptomTime = message;
@@ -146,7 +156,7 @@ class TriagemFlow extends BaseFlow {
     }
 
     if (state.step === 'waiting_time_slot') {
-      const time = this.parseTime(message);
+      const time = this.parseTime(message, state.availableSlots);
 
       if (!time || !state.availableSlots.includes(time)) {
         return this.next(
@@ -198,13 +208,17 @@ class TriagemFlow extends BaseFlow {
     const patient = context.patient?.dataValues || context.patient || {};
     const appointmentDate =
       state.date && state.time ? `${state.date} às ${state.time}` : null;
+    const appointmentDateTime = appointmentDate
+      ? this.toAppointmentDate(state.date, state.time)
+      : null;
+    let appointment = null;
 
     if (appointmentDate) {
       try {
-        await this.agendamentoService.createAppointment({
+        appointment = await this.agendamentoService.createAppointment({
           idUsuario: patient.id,
           telefone: patient.telefone,
-          dataHorario: this.toAppointmentDate(state.date, state.time),
+          dataHorario: appointmentDateTime,
           tipoProcedimento: 'Avaliacao',
           anamnese: TriagemService.createAnamneseFromAnswers({
             origem: 'triagem',
@@ -245,6 +259,7 @@ class TriagemFlow extends BaseFlow {
       complexity: state.complexity,
     });
 
+    const appointmentData = appointment?.dataValues || appointment || {};
     this.clearState(context.conversationId);
 
     return {
@@ -253,6 +268,17 @@ class TriagemFlow extends BaseFlow {
       reportable: true,
       allowHumanization: false,
       report,
+      appointment: appointmentDate
+        ? {
+            id: appointmentData.id || null,
+            dateTime: appointmentDateTime,
+            durationMinutes: appointmentData.duracao_min || null,
+            procedure: 'Avaliacao',
+            need: `Avaliação odontológica: ${state.complaint}`,
+            complexity: state.complexity,
+            status: 'pendente',
+          }
+        : null,
       reportData: {
         complaint: state.complaint,
         need: `Avaliação odontológica: ${state.complaint}`,
@@ -266,6 +292,8 @@ class TriagemFlow extends BaseFlow {
         photo: state.photo,
         photoReceived: state.photoReceived,
         appointmentDate,
+        appointmentDateTime,
+        durationMinutes: appointmentData.duracao_min || null,
       },
       reply: appointmentDate
         ? [
@@ -333,16 +361,8 @@ class TriagemFlow extends BaseFlow {
     });
   }
 
-  parseTime(value) {
-    const text = ProcedureCatalog.normalize(value);
-    const match = text.match(
-      /\b([01]?\d|20)(?::([0-5]\d))?\s*(?:h|horas?)?\b/
-    );
-    if (!match) return null;
-
-    return `${String(Number(match[1])).padStart(2, '0')}:${String(
-      Number(match[2] || 0)
-    ).padStart(2, '0')}`;
+  parseTime(value, availableSlots = []) {
+    return TimeParserService.parse(value, { availableSlots });
   }
 
   toAppointmentDate(date, time) {
@@ -384,14 +404,15 @@ class TriagemFlow extends BaseFlow {
 
   isAvailabilityQuestion(message) {
     const text = ProcedureCatalog.normalize(message);
-    return /\b(quais dias|dias disponiveis|tem disponibilidade|quando tem vaga|essa semana|esta semana|proxima semana|semana que vem|proximos dias)\b/.test(
+    return /\b(quais dias|que dias|quais datas|datas disponiveis|dias disponiveis|proximas datas|tem disponibilidade|tem disponivel|quando tem vaga|essa semana|esta semana|proxima semana|semana que vem|proximos dias)\b/.test(
       text
     );
   }
 
   isAffirmative(message) {
     const text = ConversationTextService.normalize(message);
-    return /\b(sim|ok|confirmo|certo|correto|esta certo|tudo certo)\b/.test(
+    if (this.isNegativeOrReschedule(message)) return false;
+    return /\b(sim|ok|confirmo|certo|certinho|correto|esta certo|ta certo|tudo certo|isso|isso mesmo|pode ser|beleza|combinado|fechado|perfeito|tranquilo)\b/.test(
       text
     );
   }

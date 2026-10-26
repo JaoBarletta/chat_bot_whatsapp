@@ -1,13 +1,20 @@
 'use strict';
 
 const Anamnese = require('../models/Anamnese');
+const ValidationLog = require('./ValidationLogService');
 
 class AnamneseService {
   static async syncModel() {
     await Anamnese.sync();
   }
 
-  static async saveForPatient({ patientId, anamnesis }) {
+  static async saveForPatient({ patientId, anamnesis }, { transaction } = {}) {
+    return ValidationLog.measure('db.anamnesis', () =>
+      AnamneseService.persist({ patientId, anamnesis }, { transaction }),
+      { reason: transaction ? 'external_transaction_pending' : 'persisted' });
+  }
+
+  static async persist({ patientId, anamnesis }, { transaction } = {}) {
     if (!patientId) {
       throw new Error('Paciente obrigatorio para salvar a anamnese.');
     }
@@ -31,14 +38,15 @@ class AnamneseService {
     const existing = await Anamnese.findOne({
       where: { paciente_id: patientId },
       order: [['id', 'DESC']],
+      transaction,
     });
 
     if (existing) {
-      await existing.update(payload);
+      await existing.update(payload, { transaction });
       return existing;
     }
 
-    return Anamnese.create(payload);
+    return Anamnese.create(payload, { transaction });
   }
 
   static async findLatestByPatient(patientId) {

@@ -1,16 +1,25 @@
 'use strict';
 
-const { Op } = require('sequelize');
+const { Op, Transaction } = require('sequelize');
 const Agendamento = require('../models/Agendamento');
+const ValidationLog = require('./ValidationLogService');
 
 class AgendamentoService {
   static async syncModel() {
     await Agendamento.sync();
   }
 
-  static async createAppointment({ idUsuario, telefone, dataHorario, tipoProcedimento, anamnese }) {
+  static async createAppointment(payload, { transaction } = {}) {
+    if (!transaction) {
+      // The range lock keeps competing bookings from both passing availability.
+      return ValidationLog.measure('db.appointment', () => Agendamento.sequelize.transaction(
+        { isolationLevel: Transaction.ISOLATION_LEVELS.SERIALIZABLE },
+        (tx) => AgendamentoService.createAppointment(payload, { transaction: tx })
+      ), { reason: 'transaction_committed' });
+    }
+    const { idUsuario, dataHorario, anamnese } = payload;
     const pacienteId = idUsuario || null;
-    const slotAvailable = await AgendamentoService.isSlotAvailable(dataHorario);
+    const slotAvailable = await AgendamentoService.isSlotAvailable(dataHorario, { transaction });
 
     if (!slotAvailable) {
       const error = new Error('O horario selecionado nao esta mais disponivel.');
@@ -22,9 +31,10 @@ class AgendamentoService {
       paciente_id: pacienteId,
       procedimento_id: null,
       data_hora: dataHorario,
+      duracao_min: AgendamentoService.getScheduleConfig().slotMinutes,
       observacoes: anamnese,
       status: 'pendente',
-    });
+    }, { transaction });
 
     return item;
   }
@@ -46,7 +56,7 @@ class AgendamentoService {
     });
   }
 
-  static async getAvailableSlots(date) {
+  static async getAvailableSlots(date, { transaction } = {}) {
     const selectedDate = AgendamentoService.normalizeDate(date);
     const { openHour, closeHour, slotMinutes } =
       AgendamentoService.getScheduleConfig();
@@ -61,6 +71,7 @@ class AgendamentoService {
         status: { [Op.in]: ['pendente', 'confirmada'] },
       },
       order: [['data_hora', 'ASC']],
+      ...(transaction ? { transaction, lock: transaction.LOCK.UPDATE } : {}),
     });
 
     const occupiedIntervals = appointments.map((appointment) => {
@@ -121,11 +132,12 @@ class AgendamentoService {
     return availableDates;
   }
 
-  static async isSlotAvailable(dateTime) {
+  static async isSlotAvailable(dateTime, options = {}) {
     const selected = new Date(dateTime);
     if (Number.isNaN(selected.getTime())) return false;
 
-    const slots = await AgendamentoService.getAvailableSlots(selected);
+    if (selected.getSeconds() || selected.getMilliseconds()) return false;
+    const slots = await AgendamentoService.getAvailableSlots(selected, options);
     return slots.includes(AgendamentoService.formatTime(selected));
   }
 

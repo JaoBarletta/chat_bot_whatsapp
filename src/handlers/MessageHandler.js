@@ -6,6 +6,7 @@ const UserService = require('../services/UserService');
 const AtendimentoService = require('../services/AtendimentoService');
 const ResponseHumanizerService = require('../services/ResponseHumanizerService');
 const PatientReportService = require('../services/PatientReportService');
+const GoogleCalendarService = require('../services/GoogleCalendarService');
 const AgendamentoFlow = require('../flows/AgendamentoFlow');
 const TriagemFlow = require('../flows/TriagemFlow');
 const FinanceiroFlow = require('../flows/FinanceiroFlow');
@@ -13,6 +14,7 @@ const HistoricoFlow = require('../flows/HistoricoFlow');
 const HumanoFlow = require('../flows/HumanoFlow');
 const DuvidaFlow = require('../flows/DuvidaFlow');
 const OutroFlow = require('../flows/OutroFlow');
+const ValidationLog = require('../services/ValidationLogService');
 
 class MessageHandler {
   constructor({
@@ -22,6 +24,7 @@ class MessageHandler {
     atendimentoService = AtendimentoService,
     responseHumanizer = new ResponseHumanizerService(),
     reportService = PatientReportService,
+    calendarService = GoogleCalendarService,
     flows,
     onAttendanceCompleted,
     onTriageCompleted,
@@ -36,6 +39,7 @@ class MessageHandler {
     this.atendimentoService = atendimentoService;
     this.responseHumanizer = responseHumanizer;
     this.reportService = reportService;
+    this.calendarService = calendarService;
     this.registrationSessions = new Map();
     this.activeFlows = new Map();
     this.conversationHistory = new Map();
@@ -54,7 +58,27 @@ class MessageHandler {
     ]);
   }
 
-  async handle({
+  async handle(payload) {
+    return ValidationLog.run(payload.conversationId, () => ValidationLog.measure(
+      'message.process', async () => {
+        const before = this.activeFlows.get(payload.conversationId);
+        const stepBefore = this.flows.get(before)?.getState?.(payload.conversationId)?.step ||
+          this.registrationSessions.get(payload.conversationId)?.step || 'idle';
+        const result = await this.processMessage(payload);
+        const after = this.activeFlows.get(payload.conversationId);
+        await ValidationLog.record('flow.transition', {
+          intent: result?.intent || after || before || 'OUTRO', stepBefore,
+          stepAfter: this.flows.get(after)?.getState?.(payload.conversationId)?.step ||
+            this.registrationSessions.get(payload.conversationId)?.step || 'idle',
+          finished: result?.finished === true, reportable: result?.reportable === true,
+          status: this.isCancellation(String(payload.message || '').trim()) ? 'cancelled' : 'processed',
+        });
+        return result;
+      }, { inputChars: String(payload.message || '').length, hasImage: Boolean(payload.hasImage) }
+    ));
+  }
+
+  async processMessage({
     conversationId,
     phone,
     message,
@@ -80,7 +104,7 @@ class MessageHandler {
       return this.handleRegistration(context, registration);
     }
 
-    const patient = await this.userService.findByPhone(phone);
+    const patient = await ValidationLog.measure('db.patient_lookup', () => this.userService.findByPhone(phone));
     if (!patient) {
       this.registrationSessions.set(conversationId, { step: 'waiting_name' });
       return this.sendText(
@@ -104,10 +128,12 @@ class MessageHandler {
     }
 
     const intent = await this.router.route(normalizedMessage);
+    await ValidationLog.record('routing.decision', { intent, status: 'local_rules' });
     return this.startFlow(intent, context);
   }
 
   async startFlow(intent, context) {
+    await ValidationLog.record('flow.started', { intent, status: 'started' });
     const flow = this.flows.get(intent) || this.flows.get(IntentTypes.OUTRO);
     const result = await flow.start(context);
 
@@ -120,14 +146,18 @@ class MessageHandler {
   }
 
   async handleActiveFlow(activeIntent, context) {
+    const activeFlow = this.flows.get(activeIntent);
+    const collectingAnamnesis = activeFlow?.getState?.(context.conversationId)
+      ?.step?.startsWith('waiting_anamnesis');
     const interruption = context.message
       ? this.router.detectByRegex(context.message)
       : null;
 
     if (
       interruption === IntentTypes.HUMANO ||
-      (activeIntent === IntentTypes.AGENDAMENTO && interruption === IntentTypes.SINTOMA)
+      (activeIntent === IntentTypes.AGENDAMENTO && !collectingAnamnesis && interruption === IntentTypes.SINTOMA)
     ) {
+      await ValidationLog.record('flow.interrupted', { intent: activeIntent, reason: interruption === IntentTypes.HUMANO ? 'human_requested' : 'symptom_reported', status: 'interrupted' });
       const currentFlow = this.flows.get(activeIntent);
       currentFlow?.cancel(context);
       this.activeFlows.delete(context.conversationId);
@@ -150,6 +180,9 @@ class MessageHandler {
   }
 
   async deliverFlowResult(context, result) {
+    if (result.allowHumanization === false) {
+      await ValidationLog.record('humanizer.decision', { status: 'skipped', reason: 'flow_policy', intent: result.intent });
+    }
     const recentHistory = this.conversationHistory.get(context.conversationId) || [];
     const patient = context.patient?.dataValues || context.patient || {};
     const reply = result.allowHumanization === false
@@ -177,18 +210,29 @@ class MessageHandler {
         intent: result.intent,
         data: reportData,
       });
+      await ValidationLog.record('attendance.completed', { intent: result.intent,
+        hasAppointment: Boolean(result.appointment), hasPhoto: Boolean(reportData.photo),
+        hasAnamnesis: Object.values(reportData.anamnesis || {}).some((value) => value !== null),
+        status: 'completed' });
 
       try {
-        await this.onAttendanceCompleted({
+        await ValidationLog.measure('report.callback', () => this.onAttendanceCompleted({
           report,
           reportData,
           patient: context.patient,
           conversationId: context.conversationId,
           photo: reportData.photo || null,
-        });
+        }));
       } catch (error) {
         console.error('Erro ao encaminhar relatorio do atendimento:', error.message);
       }
+
+      await this.publishCalendarEvent({
+        result,
+        report,
+        reportData,
+        patient: context.patient,
+      });
     }
 
     await this.atendimentoService.saveHistory({
@@ -251,13 +295,13 @@ class MessageHandler {
       }
 
       try {
-        const { user, created } = await this.userService.createPatient({
+        const { user, created } = await ValidationLog.measure('db.patient_registration', () => this.userService.createPatient({
           nome: registration.name,
           dataNascimento: registration.birthDate,
           cpf: registration.cpf,
           telefone: context.phone,
           email: skipEmail ? null : message,
-        });
+        }));
 
         this.registrationSessions.delete(conversationId);
         await this.sendText(
@@ -284,6 +328,7 @@ class MessageHandler {
   }
 
   async cancelCurrentInteraction(context) {
+    await ValidationLog.record('flow.cancelled', { intent: this.activeFlows.get(context.conversationId) || 'OUTRO', status: 'cancelled' });
     this.registrationSessions.delete(context.conversationId);
 
     const activeIntent = this.activeFlows.get(context.conversationId);
@@ -317,8 +362,47 @@ class MessageHandler {
     return result.finished && result.reportable === true;
   }
 
+  async publishCalendarEvent({ result, report, reportData, patient }) {
+    const appointment = result.appointment || null;
+    const appointmentDateTime = appointment?.dateTime || reportData.appointmentDateTime;
+
+    if (!appointmentDateTime || !this.calendarService) {
+      await ValidationLog.record('calendar.result', { status: 'skipped', reason: 'no_appointment_or_service' });
+      return null;
+    }
+
+    if (typeof this.calendarService.createAppointmentEvent !== 'function') {
+      return null;
+    }
+
+    try {
+      const calendarResult = await ValidationLog.measure('calendar.publish', () => this.calendarService.createAppointmentEvent({
+        patient,
+        intent: result.intent,
+        reportData,
+        report,
+        appointment,
+      }));
+      await ValidationLog.record('calendar.result', { status: calendarResult?.created ? 'created' : 'not_created',
+        reason: ['disabled', 'without_appointment_date', 'already_exists'].includes(calendarResult?.status)
+          ? calendarResult.status : 'service_result' });
+
+      if (calendarResult?.created) {
+        console.log(
+          `Evento criado no Google Calendar: ${calendarResult.htmlLink || calendarResult.eventId}`
+        );
+      }
+
+      return calendarResult;
+    } catch (error) {
+      await ValidationLog.record('calendar.result', { status: 'error', errorCode: ValidationLog.errorCode(error) });
+      console.error('Erro ao criar evento no Google Calendar:', error.message);
+      return null;
+    }
+  }
+
   async sendText(to, text) {
-    return this.sendMessage(to, { text });
+    return ValidationLog.measure('whatsapp.reply', () => this.sendMessage(to, { text }), { outputChars: String(text || '').length });
   }
 
   async logAttendanceReport({ report }) {

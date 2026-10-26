@@ -10,6 +10,8 @@ const {
   DisconnectReason,
   Browsers,
   downloadMediaMessage,
+  fetchLatestWaWebVersion,
+  fetchLatestBaileysVersion,
 } = require('@whiskeysockets/baileys');
 const qrcode = require('qrcode-terminal');
 const Database = require('./src/database/connection');
@@ -47,6 +49,141 @@ const incomingMessageBuffer = new IncomingMessageBuffer({
     });
   },
 });
+
+function writeLog(scope, level, message, details = null) {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] [${scope}] [${level}] ${message}`);
+
+  if (details) {
+    console.log(JSON.stringify(details, null, 2));
+  }
+}
+
+function normalizeBaileysLogArgs(args) {
+  let message = '';
+  let details = null;
+
+  for (const arg of args) {
+    if (typeof arg === 'string') {
+      message = message ? `${message} ${arg}` : arg;
+      continue;
+    }
+
+    if (arg instanceof Error) {
+      message = message || arg.message;
+      details = {
+        name: arg.name,
+        message: arg.message,
+      };
+      continue;
+    }
+
+    if (arg && typeof arg === 'object') {
+      details = details || arg;
+      if (!message && typeof arg.msg === 'string') {
+        message = arg.msg;
+      }
+    }
+  }
+
+  return {
+    message: message || 'Evento do Baileys',
+    details,
+  };
+}
+
+function createBaileysLogger() {
+  const configuredLevel = String(
+    process.env.BAILEYS_LOG_LEVEL || 'silent'
+  ).toLowerCase();
+  const levels = {
+    trace: 10,
+    debug: 20,
+    info: 30,
+    warn: 40,
+    error: 50,
+    fatal: 60,
+    silent: 999,
+  };
+  const minimumLevel = levels[configuredLevel] || levels.silent;
+  const logger = {
+    level: configuredLevel,
+    child() {
+      return logger;
+    },
+  };
+
+  for (const [level, weight] of Object.entries(levels)) {
+    if (level === 'silent') continue;
+
+    logger[level] = (...args) => {
+      if (weight < minimumLevel) return;
+
+      const { message, details } = normalizeBaileysLogArgs(args);
+      writeLog('BAILEYS', level.toUpperCase(), message, details);
+    };
+  }
+
+  return logger;
+}
+
+const AUTH_RESET_STATUS_CODES = new Set([
+  DisconnectReason.loggedOut,
+  DisconnectReason.badSession,
+  DisconnectReason.multideviceMismatch,
+  405,
+]);
+
+function parseBaileysVersion(value) {
+  const parts = String(value || '')
+    .split(/[.,\s]+/)
+    .filter(Boolean)
+    .map(Number);
+
+  if (parts.length !== 3 || parts.some((part) => !Number.isInteger(part))) {
+    return null;
+  }
+
+  return parts;
+}
+
+async function resolveBaileysVersion() {
+  const configuredVersion = parseBaileysVersion(process.env.BAILEYS_VERSION);
+  if (configuredVersion) {
+    console.log(
+      `Usando versao do Baileys configurada no .env: ${configuredVersion.join('.')}`
+    );
+    return configuredVersion;
+  }
+
+  const latestWaWeb = await fetchLatestWaWebVersion();
+  if (latestWaWeb?.version) {
+    if (latestWaWeb.error) {
+      console.warn(
+        `Nao foi possivel buscar a versao mais recente do WhatsApp Web (${latestWaWeb.error.message || latestWaWeb.error}). Usando fallback do Baileys.`
+      );
+    }
+
+    console.log(
+      `Versao do WhatsApp Web usada pelo Baileys: ${latestWaWeb.version.join('.')}${latestWaWeb.isLatest ? '' : ' (fallback)'}`
+    );
+    return latestWaWeb.version;
+  }
+
+  const latestBaileys = await fetchLatestBaileysVersion();
+  if (latestBaileys?.version) {
+    console.log(
+      `Versao do Baileys usada como fallback: ${latestBaileys.version.join('.')}`
+    );
+    return latestBaileys.version;
+  }
+
+  return undefined;
+}
+
+function shouldReconnect(statusCode) {
+  return !AUTH_RESET_STATUS_CODES.has(Number(statusCode));
+}
 
 function loadLidMapping(lid) {
   if (!lid) return null;
@@ -187,11 +324,18 @@ async function startSock() {
   }
 
   const { state, saveCreds } = await useMultiFileAuthState(authDirectory);
-  const sock = makeWASocket({
+  const version = await resolveBaileysVersion();
+  const socketConfig = {
     auth: state,
     browser: Browsers.ubuntu('Chrome'),
-    version: [2, 3000, 1034074495],
-  });
+    logger: createBaileysLogger(),
+  };
+
+  if (version) {
+    socketConfig.version = version;
+  }
+
+  const sock = makeWASocket(socketConfig);
 
   registerMessagingServices(sock);
 
@@ -208,14 +352,16 @@ async function startSock() {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       console.log('Conexao fechada. Status:', statusCode);
 
-      if (statusCode !== DisconnectReason.loggedOut) {
+      if (shouldReconnect(statusCode)) {
         setTimeout(() => {
           startSock().catch((error) => {
             console.error('Erro ao reconectar WhatsApp:', error.message);
           });
         }, 3000);
       } else {
-        console.log('Sessao encerrada. Apague a pasta auth e conecte novamente.');
+        console.log(
+          'Sessao do WhatsApp invalida ou registro recusado. Pare o bot, apague ou renomeie a pasta auth e conecte novamente pelo QR Code.'
+        );
       }
     }
   });

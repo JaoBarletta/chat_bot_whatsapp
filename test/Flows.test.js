@@ -102,6 +102,57 @@ test('AgendamentoFlow responde disponibilidade sem tratar como data invalida', a
   assert.equal(flow.getState(context.conversationId).step, 'waiting_time');
 });
 
+test('AgendamentoFlow entende datas, horarios e confirmacoes naturais', async () => {
+  const appointments = [];
+  const availableDate = futureDate(3);
+  const flow = new AgendamentoFlow({
+    agendamentoService: {
+      async getNextAvailableDates() {
+        return [{ date: availableDate, slots: ['14:00', '15:00', '16:00'] }];
+      },
+      async getAvailableSlots() {
+        return ['14:00', '15:00', '16:00'];
+      },
+      async createAppointment(data) {
+        appointments.push(data);
+        return { id: 50, duracao_min: 60 };
+      },
+    },
+  });
+  const context = {
+    conversationId: 'patient-natural-schedule',
+    message: 'Gostaria de fazer agendamento de uma limpeza de dente',
+    patient: { id: 50, nome: 'Joao', telefone: '5511999999950' },
+  };
+
+  let result = await flow.start(context);
+  assert.match(result.reply, /Limpeza/i);
+
+  result = await flow.handle({
+    ...context,
+    message: 'quais datas tem disponiveis?',
+  });
+  assert.match(ProcedureCatalog.normalize(result.reply), /proximas datas/i);
+  assert.doesNotMatch(
+    ProcedureCatalog.normalize(result.reply),
+    /entender a data/i
+  );
+
+  result = await flow.handle({ ...context, message: availableDate.slice(0, 5) });
+  assert.match(ProcedureCatalog.normalize(result.reply), /horarios disponiveis/i);
+
+  result = await flow.handle({ ...context, message: 'as 3 está bom' });
+  assert.match(result.reply, /15:00/);
+  assert.match(result.reply, /Limpeza/);
+
+  result = await flow.handle({ ...context, message: 'certinho' });
+  assert.equal(result.finished, true);
+  assert.equal(appointments.length, 1);
+  assert.equal(appointments[0].tipoProcedimento, 'Limpeza');
+  assert.equal(result.appointment.procedure, 'Limpeza');
+  assert.equal(result.reportData.appointmentDate, `${availableDate} às 15:00`);
+});
+
 test('AgendamentoFlow extrai data futura de uma frase completa', async () => {
   const flow = new AgendamentoFlow({
     agendamentoService: {

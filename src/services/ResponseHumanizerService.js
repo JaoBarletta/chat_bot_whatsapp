@@ -1,11 +1,16 @@
 'use strict';
 
-const OllamaService = require('./OllamaService');
+const OpenAIService = require('./OpenAIService');
+const AIResponseGuardService = require('./AIResponseGuardService');
 const ProcedureCatalog = require('./ProcedureCatalog');
+const IntentTypes = require('../constants/IntentTypes');
+const AIDataPolicyService = require('./AIDataPolicyService');
+const ValidationLog = require('./ValidationLogService');
 
 class ResponseHumanizerService {
-  constructor({ ollamaService = OllamaService } = {}) {
-    this.ollamaService = ollamaService;
+  constructor({ aiService = OpenAIService, mode = null } = {}) {
+    this.aiService = aiService;
+    this.mode = mode || process.env.OPENAI_HUMANIZATION_MODE || 'always';
   }
 
   async humanize({
@@ -19,8 +24,20 @@ class ResponseHumanizerService {
     const deterministicReply = String(baseReply || '').trim();
     if (!deterministicReply) return deterministicReply;
 
+    // Preserve sensitive values locally instead of asking the model to rewrite them.
+    if (AIDataPolicyService.sanitizeForModel(deterministicReply) !== deterministicReply ||
+        deterministicReply.length > 1500) {
+      await ValidationLog.record('humanizer.decision', { status: 'skipped', reason: 'data_or_size_policy', intent });
+      return deterministicReply;
+    }
+
+    if (!this.shouldCallAI({ baseReply: deterministicReply, intent })) {
+      await ValidationLog.record('humanizer.decision', { status: 'skipped', reason: 'mode_policy', intent, mode: this.mode });
+      return deterministicReply;
+    }
+
     try {
-      const candidate = await this.ollamaService.humanizeReply({
+      const candidate = await this.aiService.humanizeReply({
         baseReply: deterministicReply,
         intent,
         patientName: allowPatientName ? patientName : null,
@@ -35,8 +52,12 @@ class ResponseHumanizerService {
         conversationInProgress: recentHistory.length > 0,
       });
       const finalReply = accepted ? candidate : deterministicReply;
+      await ValidationLog.record('humanizer.decision', { intent,
+        status: accepted ? 'accepted' : 'fallback',
+        reason: accepted ? 'contract_preserved' : this.rejectionReason(candidate),
+        outputChars: String(candidate || '').length });
 
-      OllamaService.logDebugDecision({
+      this.logDebugDecision({
         baseReply: deterministicReply,
         candidate,
         accepted,
@@ -48,11 +69,12 @@ class ResponseHumanizerService {
 
       return finalReply;
     } catch (error) {
-      if (error.code !== 'OLLAMA_UNAVAILABLE') {
-        console.error('Falha ao humanizar resposta com Ollama:', error.message);
+      await ValidationLog.record('humanizer.decision', { intent, status: 'fallback', reason: 'api_unavailable', errorCode: ValidationLog.errorCode(error) });
+      if (error.code !== 'OPENAI_UNAVAILABLE') {
+        console.error('Falha ao humanizar resposta com IA:', error.message);
       }
 
-      OllamaService.logDebugDecision({
+      this.logDebugDecision({
         baseReply: deterministicReply,
         candidate: null,
         accepted: false,
@@ -61,6 +83,47 @@ class ResponseHumanizerService {
       });
       return deterministicReply;
     }
+  }
+
+  shouldCallAI({ baseReply, intent }) {
+    const mode = String(this.mode || 'always').toLowerCase();
+    if (mode === 'off' || mode === 'false' || mode === 'disabled') {
+      return false;
+    }
+
+    if (mode === 'always') {
+      return true;
+    }
+
+    if (
+      intent === IntentTypes.SINTOMA ||
+      intent === IntentTypes.AGENDAMENTO
+    ) {
+      return false;
+    }
+
+    return !this.isOperationalReply(baseReply);
+  }
+
+  rejectionReason(candidate) {
+    if (!String(candidate || '').trim()) return 'empty_response';
+    if (this.hasUnsafeClinicalClaim(candidate)) return 'clinical_claim';
+    if (this.hasDisrespectfulTone(candidate)) return 'disrespectful_tone';
+    if (AIResponseGuardService.hasSpeakerLabel(candidate)) return 'speaker_label';
+    return 'workflow_contract';
+  }
+
+  isOperationalReply(baseReply) {
+    const text = ProcedureCatalog.normalize(baseReply);
+
+    return [
+      /\b\d{1,2}\/\d{1,2}\/\d{4}\b/,
+      /\b\d{1,2}:\d{2}\b/,
+      /\b(horarios disponiveis|datas disponiveis|proximas datas)\b/,
+      /\b(so para confirmar|esta tudo certo|a data e o horario estao certos)\b/,
+      /\b(registrei sua solicitacao|aguardando confirmacao|a equipe vai conferir)\b/,
+      /\b(diabetes|hipertensao|anamnese|transfusao|transplante|anestesia|alergia)\b/,
+    ].some((pattern) => pattern.test(text));
   }
 
   isValidCandidate({
@@ -74,6 +137,7 @@ class ResponseHumanizerService {
 
     const maximumLength = Math.max(300, approved.length * 2.5);
     if (!generated || generated.length > maximumLength) return false;
+    if (AIResponseGuardService.hasSpeakerLabel(generated)) return false;
     if (this.hasDisrespectfulTone(generated)) return false;
     if (this.hasUnsafeClinicalClaim(generated)) return false;
     if (this.introducesProtectedProcedure(approved, generated)) return false;
@@ -98,7 +162,7 @@ class ResponseHumanizerService {
 
   hasUnsafeClinicalClaim(message) {
     const text = ProcedureCatalog.normalize(message);
-    return /\b(seu diagnostico|parece ser|provavelmente e|deve ser|precisa fazer|recomendo o tratamento|tratamento indicado|tome [a-z]|use [a-z]+ por \d+ dias|prescrevo|antibiotico indicado)\b/.test(text);
+    return /\b(seu diagnostico|parece ser|provavelmente e|deve ser|precisa fazer|recomendo|aconselho|tratamento indicado|tome [a-z]|use [a-z]+ por \d+ dias|prescrevo|antibiotico indicado|voce tem carie|e uma infeccao|e uma pulpite|ibuprofeno|amoxicilina|dipirona|paracetamol|bochecho|automedicacao)\b/.test(text);
   }
 
   hasDisrespectfulTone(message) {
@@ -230,6 +294,14 @@ class ResponseHumanizerService {
     const leftValues = [...new Set(left)].sort();
     const rightValues = [...new Set(right)].sort();
     return JSON.stringify(leftValues) === JSON.stringify(rightValues);
+  }
+
+  logDebugDecision(payload) {
+    if (typeof this.aiService.logDebugDecision === 'function') {
+      this.aiService.logDebugDecision(payload);
+      return;
+    }
+
   }
 }
 

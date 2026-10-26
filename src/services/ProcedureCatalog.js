@@ -43,6 +43,19 @@ class ProcedureCatalog {
     return Boolean(ProcedureCatalog.extract(message));
   }
 
+  static canonicalize(value) {
+    const rawValue = String(value || '').trim();
+    const text = ProcedureCatalog.normalize(rawValue);
+    if (!text) return null;
+
+    const procedure = PROCEDURES.find(({ name, terms }) => {
+      if (ProcedureCatalog.normalize(name) === text) return true;
+      return terms.some((term) => ProcedureCatalog.matchesTerm(text, term));
+    });
+
+    return procedure?.name || rawValue;
+  }
+
   static matchesTerm(text, term) {
     if (text.includes(term)) return true;
     if (term.includes(' ')) return false;
